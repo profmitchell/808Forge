@@ -6,6 +6,7 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 import pandas as pd
 import soundfile as sf
+import librosa
 
 # Register the custom sampling function
 @register_keras_serializable()
@@ -37,7 +38,6 @@ class VAELossLayer(Layer):
     def compute_output_shape(self, input_shape):
         return input_shape[1]
 
-
 # Load preprocessed data
 df = pd.read_parquet('/Users/mitchellcohen/Desktop/808Forge/scripts/preprocessed_data.parquet')
 
@@ -57,32 +57,62 @@ for col in list_columns:
 scalar_columns = df.select_dtypes(include=[np.number]).columns
 X_scaled = MinMaxScaler().fit_transform(df[scalar_columns])
 
-# Load the trained VAE model
+# Load your trained model
 model = load_model(
-    '/Users/mitchellcohen/Desktop/808Forge/models/vae_808.keras', 
-    compile=False, 
+    '/Users/mitchellcohen/Desktop/808Forge/models/vae_808.keras',
     custom_objects={'sampling': sampling, 'VAELossLayer': VAELossLayer}
 )
 
-# User input for customization
+# Get user input for customization
 distortion_level = float(input("Enter the distortion level (0-1): "))
-pitch_envelope = float(input("Enter the pitch envelope level (0-1): "))
+pitch_envelope_level = float(input("Enter the pitch envelope level (0-1): "))
 category = input("Enter the category (e.g., 'distorted', 'clean', etc.): ")
 
-# Adjust latent space samples based on user input
-latent_dim = 2  # Latent space dimension from VAE training
-num_samples = 10  # Number of new samples to generate
-base_samples = np.random.normal(size=(num_samples, latent_dim))
+# Generate initial sample (10 random samples)
+input_dim = model.input_shape[-1]  # Fetch the input dimension from the model
 
-# Expand latent space to match the model's input shape
-# Assuming latent_dim is part of the input shape (16), replicate samples accordingly
-expanded_samples = np.tile(base_samples, (1, int(16 / latent_dim)))  # Replicate to match input shape (None, 16)
+# Generate random samples with the correct shape
+random_samples = np.random.normal(size=(10, input_dim))
 
-# Decode the expanded samples using the VAE
-generated_features = model.predict(expanded_samples)
+# Apply user inputs to the generated samples
+customized_samples = random_samples * distortion_level + pitch_envelope_level
 
-# Save the generated 808 sounds as .wav files
+# Introduce slight variations to each sample
+variation_factor = 0.1  # Change this value to control the amount of variation
+for i in range(customized_samples.shape[0]):
+    customized_samples[i] += np.random.normal(scale=variation_factor, size=customized_samples[i].shape)
+
+# Predict and generate audio features using the trained model
+generated_features = model.predict(customized_samples)
+
+# Ensure minimum length of 1 second for each generated audio
+min_length = 44100  # 1 second at 44.1 kHz sample rate
+
+# Target pitch frequency for D0 (approximately 36.71 Hz)
+target_pitch_freq = 36.71
+
+# Normalize and extend generated features to at least 1 second
 for i, features in enumerate(generated_features):
-    file_path = f'/Users/mitchellcohen/Desktop/808Forge/generated_808_{category}_{i}.wav'
-    sf.write(file_path, features, 44100)
-    print(f'Generated 808 saved: {file_path}')
+    # Normalize between -1 and 1
+    scaler = MinMaxScaler(feature_range=(-1, 1))
+    features = scaler.fit_transform(features.reshape(-1, 1)).flatten()
+
+    # Extend the sound to 1 second by padding or repeating
+    if len(features) < min_length:
+        repeat_count = int(np.ceil(min_length / len(features)))
+        extended_features = np.tile(features, repeat_count)[:min_length]
+    else:
+        extended_features = features
+
+    # Estimate the current pitch using librosa's piptrack
+    pitches, magnitudes = librosa.core.piptrack(y=extended_features, sr=44100)
+    current_pitch_freq = np.max(pitches)
+
+    # Calculate pitch shift steps to target D0
+    pitch_shift_steps = librosa.core.hz_to_midi(target_pitch_freq) - librosa.core.hz_to_midi(current_pitch_freq)
+    extended_features = librosa.effects.pitch_shift(extended_features, sr=44100, n_steps=pitch_shift_steps)
+
+    # Save the extended audio
+    file_path = f"/Users/mitchellcohen/Desktop/808Forge/generated_808_{category}_{i}.wav"
+    sf.write(file_path, extended_features, 44100)
+    print(f"Generated 808 saved: {file_path}")
